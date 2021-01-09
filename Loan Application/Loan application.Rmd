@@ -1,0 +1,276 @@
+---
+title: "Loan approval prediction"
+author: "Mustafa Arslan"
+date: "1/5/2021"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(keras)
+library(dplyr)
+library(tidyverse)
+library(recipes)
+library(randomForest)
+library(caret)
+library(pROC)
+
+```
+
+
+```{r}
+
+df<- read.csv("loan_train.csv")
+head(df)
+
+```
+
+
+```{r}
+# Data Cleaning 1
+
+#Assigning Missing values to Median values within the observation
+median1<- median(df[,"DisbursementDate"], na.rm=T)
+median2<- median(df[,"xx"], na.rm=T)
+df[is.na(df$DisbursementDate),"DisbursementDate" ] <- median1
+df[is.na(df$xx),"xx" ] <- median2 
+df[is.na(df$NewExist),"NewExist"] <- 0
+```
+
+
+```{r}
+#Data Cleaning 2
+str(df)
+
+df1 <- df %>%
+  select(-c(LoanNr_ChkDgt, City, State, Zip, Name, Bank, BankState,NAICS, BalanceGross,NoEmp)) %>%
+  mutate_at(vars(MIS_Status,Recession,UrbanRural,RevLineCr,
+                 LowDoc,New,RealEstate,NewExist), list(factor))
+
+
+```
+
+
+```{r}
+#Data Preparation1
+#Set levels for RevLineCr  & LowDoc & MIS_STATUS
+levels(df1$RevLineCr) <- c("0","0","N","T","Y")
+levels(df1$LowDoc)<-c("N","N","N","N","S","Y")
+levels(df1$MIS_Status) <-c("No","Yes")
+```
+
+
+```{r}
+#Data Preparation 2
+hist(df1$Portion)
+df1$Portion <- cut(x = df1$Portion, breaks = c(0,0.51,0.74,0.84,0.86,0.92,1.1),
+                   labels = c("A1","A2", "A3","A4","A5", "A6") )
+hist(df1$FranchiseCode)
+df1$FranchiseCode <- cut(x = df1$FranchiseCode, breaks = c(-.5,0.5,1.5,Inf),
+                         labels = c("L1","L2", "L3") )
+hist(df1$ApprovalFY)
+df1$ApprovalFY <- cut(df1$ApprovalFY, 4, include.lowest=TRUE, 
+                      labels=c("A1","A2", "A3","A4") )
+hist(df1$Term)
+df1$Term <- cut(df1$Term, breaks = c(0,35,37,59,61,83,85,95,97,119,Inf),
+                include.lowest=TRUE,labels=c(1:10))
+hist(df1$CreateJob)
+df1$CreateJob <- cut(df1$CreateJob, breaks= c(0,0.5,3,Inf), include.lowest=TRUE, 
+                     labels=c("A1","A2", "A3") )
+hist(df1$RetainedJob)
+df1$RetainedJob <- cut(df1$RetainedJob, breaks= c(0,0.5,Inf), include.lowest=TRUE, 
+                       labels=c("A1","A2") )
+
+hist(df1$daysterm)
+df1$daysterm <- cut(df1$daysterm, 
+                    breaks = c(0,1070,1090,1640,1771,1810,2510,2530,3500,7000,Inf), 
+                    include.lowest=TRUE, labels = c(1:10))
+
+hist(df1$DisbursementDate)
+df1$DisbursementDate <- cut(df1$DisbursementDate, 
+                            breaks = c(0,16420,Inf),labels = c("A1","A2"),
+                            include.lowest=TRUE)
+hist(df1$ApprovalDate)
+df1$ApprovalDate <- cut(df1$ApprovalDate, 
+                        breaks = c(0,11320,11925,16045,16282,Inf), 
+                        labels= c("A1","A2","A3","A4","A5"),include.lowest=TRUE)
+hist(df1$xx)
+df1$xx <- cut(df1$xx, breaks = c(0,16750,18153,Inf), 
+              labels= c("A1","A2","A3"),include.lowest=TRUE)
+hist(df1$DisbursementGross)
+df1$DisbursementGross<- cut(df1$DisbursementGross,
+                            breaks = c(0,9450,35100,42480,49600,140000,Inf), 
+                            labels= c("A1","A2","A3","A4","A5","A6"),include.lowest=TRUE)
+hist(df1$SBA_Appv)
+df1$SBA_Appv<- cut(df1$SBA_Appv,breaks = c(0,2600,17400,55000,Inf), 
+                   labels= c("A1","A2","A3","A4"),include.lowest=TRUE)
+hist(df1$GrAppv)
+df1$GrAppv<- cut(df1$GrAppv,breaks = c(0,5100,16800,24900,34000,61000,99000,120000,Inf), 
+                 labels= c("A1","A2","A3","A4","A5","A6","A7","A8"),
+                 include.lowest=TRUE)
+```
+
+
+```{r}
+#  Data Partition
+train_index =createDataPartition(df1$MIS_Status, p=.8,
+                                 times=1,
+                                 list=FALSE)
+df1.train <- df1[train_index,]
+df1.test  <- df1[-train_index,]
+
+dim(df1)
+dim(df1.train)
+dim(df1.test)
+```
+
+
+```{r}
+#Preprocess the Data with Recipe Library
+rec_obj <- recipe(MIS_Status ~ ., data = df1.train) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep(data = df1.train)
+rec_obj
+
+
+
+# Predictors
+x_train <- bake(rec_obj, new_data = df1.train) %>% select(- MIS_Status)
+x_test  <- bake(rec_obj, new_data = df1.test)  %>% select(- MIS_Status)
+
+#Target
+y_train <- ifelse(pull(df1.train, MIS_Status) == "Yes", 1, 0)
+y_test  <- ifelse(pull(df1.test,  MIS_Status) == "Yes", 1, 0)
+```
+
+
+```{r}
+#Create Model
+model1 <- keras_model_sequential()
+
+#this variable(model) contains instructions below
+model1 %>%
+  layer_dense(units= 16,
+              activation='relu',
+              kernel_initializer = 'uniform',
+              input_shape = ncol(x_train)) %>% # input layer
+  
+  layer_dropout(rate = 0.2) %>%         
+
+  # layer_dense(units= 64,
+  #             kernel_initializer = 'uniform',
+  #             activation='relu') %>%               # 2nd hidden layer
+  
+  layer_dropout(rate = 0.4) %>%                    # Hidden layer for preventing overfitting
+  
+  layer_dense(units= 8,
+              kernel_initializer = 'uniform',
+              activation='relu') %>%               # 2nd hidden layer
+  
+  layer_dense(units=1,
+              activation = 'sigmoid') %>%          # output layer
+  # sigmoid is common for binary classification
+  
+  #Compile Model
+  
+  compile(optimizer =optimizer_adam(lr=0.003),
+          loss = 'binary_crossentropy',
+          metrics=c('accuracy'))
+
+model1
+
+```
+
+
+```{r}
+# Fit the keras model to the training data
+history <- fit(
+  object           = model1, 
+  x                = as.matrix(x_train), 
+  y                = y_train,
+  batch_size       = 50, 
+  epochs           = 30,
+  validation_split = 0.30
+)
+
+plot(history)
+print(history)
+```
+
+
+```{r}
+#Predicting the Test Data
+
+#Probability prediction
+
+x_test_prob <- predict_proba(object = model1, x = as.matrix(x_test)) %>%
+  as.vector()
+
+#Class prediction
+x_test_class<- predict_classes(object = model1, x = as.matrix(x_test)) %>%
+  as.vector()
+
+
+
+y_test_class<-as.factor(y_test)
+x_test_class <- as.factor(x_test_class)
+
+
+Pred_Table<- table(y_test_class,x_test_class)
+Pred_Table
+
+
+
+
+confusionMatrix(x_test_class,y_test_class)
+```
+
+
+```{r}
+#RANDOM FOREST
+
+
+model2 <- randomForest(MIS_Status~.,data=df1.train, importance=T, mtry=2)
+model2
+
+
+prediction1 <- predict(model2, df1.test)
+confusionMatrix(prediction1, df1.test$MIS_Status)
+```
+
+
+```{r}
+#LOGISTIC REGRESSION
+str(df1.train)
+
+df1.train<- df1.train%>%
+  select(-c(LowDoc))
+df1.test<- df1.test%>%
+  select(-c(LowDoc))
+
+
+model3 <- glm(MIS_Status~.,data=df1.train, family= binomial(logit))
+model3
+
+
+
+p2 <- predict(model3,df1.test,  type='response')
+glm.pred =rep("No",220)
+glm.pred[p2>=0.5]="Yes"
+glm.pred <- as.factor(glm.pred)
+
+length(df1.test$MIS_Status)
+length(glm.pred)
+
+confusionMatrix(glm.pred,df1.test$MIS_Status)
+```
+
+
+```{r}
+#AUC & ROC 
+roc(df1.train$MIS_Status,model3$fitted.values , plot=T)
+```
+
